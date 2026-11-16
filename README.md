@@ -23,7 +23,7 @@ O painel busca os contratos do exercício na **API oficial do PNCP** (Portal Nac
 ## 🗂️ Estrutura
 
 ```
-FiscalizaObras-MS/
+fiscalizacontratos-MS/
 ├── app.py                          # Interface Streamlit
 ├── config/
 │   └── regioes_ms.py               # Fiscais fixos, 18 regiões, códigos IBGE, URLs e sistemas dos portais
@@ -84,11 +84,11 @@ PORTAIS_CONFIRMADOS = {
 ## 💻 Executar localmente
 
 ```bash
-git clone https://github.com/<seu-usuario>/FiscalizaObras-MS.git
+git clone https://github.com/Ovando18/fiscalizacontratos-MS.git
 ```
 
 ```bash
-cd FiscalizaObras-MS
+cd fiscalizacontratos-MS
 ```
 
 ```bash
@@ -117,16 +117,16 @@ pip install pytest && python -m pytest -q tests
 
 ### 1. Criar o repositório no GitHub
 1. Acesse https://github.com/new
-2. Em **Repository name**, digite `FiscalizaObras-MS`
+2. Em **Repository name**, digite `fiscalizacontratos-MS`
 3. Escolha **Public** (o plano gratuito do Streamlit Cloud precisa de repositório público ou de acesso autorizado a repositórios privados)
 4. **Não** marque "Add a README", ".gitignore" nem "license" (o projeto já tem esses arquivos)
 5. Clique em **Create repository**
 
 ### 2. Enviar o código
-Na pasta do projeto (o repositório já está inicializado na branch `main` e com o primeiro commit):
+Na pasta do projeto (repositório oficial: https://github.com/Ovando18/fiscalizacontratos-MS):
 
 ```bash
-git remote add origin https://github.com/<seu-usuario>/FiscalizaObras-MS.git
+git remote add origin https://github.com/Ovando18/fiscalizacontratos-MS.git
 ```
 
 ```bash
@@ -136,14 +136,14 @@ git push -u origin main
 Alternativa com GitHub CLI (cria o repositório e envia em um passo):
 
 ```bash
-gh repo create FiscalizaObras-MS --public --source=. --remote=origin --push
+gh repo create fiscalizacontratos-MS --public --source=. --remote=origin --push
 ```
 
 ### 3. Publicar no Streamlit Community Cloud
 1. Acesse https://share.streamlit.io e entre com sua conta GitHub
 2. Clique em **Create app**, depois em **Deploy a public app from GitHub**
 3. Preencha:
-   - **Repository:** `<seu-usuario>/FiscalizaObras-MS`
+   - **Repository:** `Ovando18/fiscalizacontratos-MS`
    - **Branch:** `main`
    - **Main file path:** `app.py`
    - **App URL:** escolha um subdomínio (ex.: `fiscalizaobras-ms`)
