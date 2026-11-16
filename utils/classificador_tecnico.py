@@ -82,9 +82,9 @@ PALAVRAS_CHAVE: Dict[str, List[Tuple[str, int]]] = {
     AREA_PROJETOS: [
         (r"\bprojeto(s)? (basico|executivo|arquitetonic|estrutural|complementar|eletrico|hidrossanitari)", 5),
         (r"\belaboracao de projeto", 5), (r"\blaudos?\b", 4), (r"\bpericia", 3), (r"\bvistoria tecnica", 4),
-        (r"\bconsultoria (tecnica|em engenharia|ambiental)", 4), (r"\bassessoria tecnica", 3), (r"\bgerenciamento de obra", 5),
+        (r"\bconsultoria (tecnica )?(em|de) engenharia|\bconsultoria ambiental", 4), (r"\bassessoria tecnica (em|de) engenharia", 3), (r"\bgerenciamento de obra", 5),
         (r"\bfiscalizacao de obra|\bsupervisao de obra", 5), (r"\borcamento(s)? de obra|\bplanilha orcamentaria", 4),
-        (r"\bestudo(s)? (de viabilidade|preliminar|tecnico)", 3), (r"\bplano diretor", 3), (r"\bplano municipal de saneamento", 4),
+        (r"\bestudo(s)? de viabilidade", 3), (r"\bplano diretor", 3), (r"\bplano municipal de saneamento", 4),
         (r"\bavaliacao de imove", 3), (r"\binspecao predial", 4), (r"\bas[- ]built", 4), (r"\bbim\b", 3),
     ],
 }
@@ -95,7 +95,7 @@ TERMOS_EXCLUSAO: List[str] = [
     r"\bpneus?\b", r"\blocacao de veiculo", r"\bmaterial (de )?limpeza", r"\buniformes?\b", r"\bshows?\b",
     r"\bpassagens? aerea", r"\bcestas? basica", r"\bmaterial didatico", r"\bfardamento",
     r"\baquisi\w* (de )?(materia|pecas?|equipamento|maquin|veicul|trator|retroescavadeira|caminh|ferramenta|tubos?)",
-    r"\bmateriais? de consumo", r"\blocacao de (imovel|software|sistema)", r"\bsoftware", r"\bmao de obra terceirizada",
+    r"\bmateriais? de consumo", r"\blocacao de (imovel|software|sistema)", r"\bsoftware", r"\bmao de obra terceirizada", r"\bpublicidade", r"\bdivulgacao",
 ]
 
 # Categorias PNCP que indicam fornecimento de bens/locação (exigem evidência mais forte)
@@ -255,7 +255,7 @@ def indicios_fiscalizacao(contrato: Dict) -> List[str]:
     if contrato.get("status_contrato") == "Não publicado no portal":
         itens.append("⚠️ Instrumento contratual não localizado no PNCP — solicitar cópia ao órgão.")
     if contrato.get("status_os") != "Documento localizado":
-        itens.append("⚠️ Ordem de Serviço não publicada: verificar data real de início dos serviços.")
+        itens.append("⚠️ Ordem de Serviço não localizada como anexo: verificar data real de início dos serviços.")
     if contrato.get("situacao") == "Paralisado / Suspenso":
         itens.append("⚠️ Contrato com indício de paralisação/suspensão: verificar responsabilidade técnica no período.")
     saldo = contrato.get("saldo_a_empenhar")

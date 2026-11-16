@@ -91,7 +91,7 @@ def test_coleta_orquestrada_sem_rede(monkeypatch):
     monkeypatch.setattr(cc.ClientePNCP, "arquivos", lambda self, *a: [])
     monkeypatch.setattr(cc.ClientePNCP, "termos", lambda self, *a: [])
     monkeypatch.setattr(cc.ClientePNCP, "compra", lambda self, *a: None)
-    res = cc.coletar_contratos([MUNICIPIOS["DOURADOS"]], 2026)
+    res = cc.coletar_contratos([MUNICIPIOS["DOURADOS"], MUNICIPIOS["DOURADOS"]], 2026)  # Dourados é Betha
     assert len(res.contratos) == 1
     c = res.contratos[0]
     assert c["status_contrato"] == cc.STATUS_DOC_AUSENTE and c["url_contrato"].startswith("https://pncp.gov.br/app/")
@@ -120,3 +120,83 @@ def test_deduplicacao():
                                      "numeroControlePNCP": "a-2-53/2026"}, mun)
     res = cc.deduplicar([a, b])
     assert len(res) == 1 and res[0]["_seq"] == 53
+
+
+REG_FIORILLI = {
+    "CODIGO": "1090/26", "ANO": "2026", "LICIT": "CONCORRÊNCIA ELETRÔNICA", "PROCLIC": "000029/26",
+    "MODALI": "OBRA CONCORRÊNCIA EL", "NUMLICMOD": "0005/26", "FORNECEDOR": "EMPRESA TESTE ENGENHARIA LTDA",
+    "VALCON": "4825527,58", "DTASSI": "09/01/2026 00:00:00", "VIGENI": "09/01/2026 00:00:00",
+    "VIGENF": "09/01/2099 00:00:00", "VENCIMENTO_ATUAL": "09/01/2099 00:00:00",
+    "OBJETO_COMPLETO": "Construção do Centro de Atenção Psicossocial", "ENTIDADE": "PREFEITURA",
+    "TIPOCOOBRA": "11", "CONTRATONUM": "000011", "EMPENHADOANT": "0", "EMPENHADO": "1000000",
+    "LIQUIDADOANT": "0", "LIQUIDADO": "250000,5", "SALDOEMPENHAR": "3825527,58", "EMPRESA": "1",
+    "INSMF": "12.345.678/0001-90", "DTANULA": "", "DTENCERRAMENTO": "",
+}
+
+
+def test_portais_da_planilha():
+    from config.regioes_ms import PORTAIS_TRANSPARENCIA
+    assert len(PORTAIS_TRANSPARENCIA) == 79 and set(PORTAIS_TRANSPARENCIA) == set(MUNICIPIOS)
+    assert sum(1 for s, _ in PORTAIS_TRANSPARENCIA.values() if s == "FIORILLI") == 39
+    assert cc.base_api_fiorilli(MUNICIPIOS["COXIM"].url_portal) == "http://pmcoxim.rcmsuporte.com.br:8079/transparencia"
+    assert MUNICIPIOS["RIO VERDE DE MATO GROSSO"].url_portal.startswith("https://transparencia.betha.cloud/#/")
+
+
+def test_normalizacao_fiorilli():
+    p = cc.normalizar_contrato_fiorilli(REG_FIORILLI, MUNICIPIOS["DOURADOS"])
+    assert p["valor_global"] == 4825527.58 and p["valor_empenhado"] == 1000000.0
+    assert p["valor_liquidado"] == 250000.5 and p["saldo_a_empenhar"] == 3825527.58
+    assert p["numero_contrato"] == "11/2026" and p["cnpj_fornecedor"] == "12.345.678/0001-90"
+    assert p["area"] == AREA_CIVIL and p["status_empenho"] == cc.STATUS_DOC_PORTAL
+
+
+def test_fusao_sem_duplicidade():
+    mun = MUNICIPIOS["DOURADOS"]
+    pncp = cc.normalizar_contrato_pncp(BRUTO, mun)
+    todos = [pncp]
+    igual = cc.normalizar_contrato_fiorilli(REG_FIORILLI, mun)
+    repetido = cc.normalizar_contrato_fiorilli({**REG_FIORILLI, "EMPRESA": "9"}, mun)  # mesmo contrato, outra entidade
+    so_portal = cc.normalizar_contrato_fiorilli({**REG_FIORILLI, "CODIGO": "2000/26", "CONTRATONUM": "000500",
+                                                 "INSMF": "98.765.432/0001-10", "VALCON": "100000"}, mun)
+    vinc, novos, desc = cc.mesclar_portal(todos, [igual, repetido, so_portal], mun)
+    assert (vinc, novos, desc) == (1, 1, 1)
+    assert len(todos) == 2
+    assert pncp["valor_empenhado"] == 1000000.0 and pncp["fonte"].startswith("PNCP + ")
+    assert pncp["url_contrato"].startswith("https://pncp.gov.br")  # documento do PNCP preservado
+
+
+def test_fusao_nao_casa_mesmo_cnpj_sem_outro_criterio():
+    mun = MUNICIPIOS["DOURADOS"]
+    todos = [cc.normalizar_contrato_pncp(BRUTO, mun)]
+    outro = cc.normalizar_contrato_fiorilli({**REG_FIORILLI, "CONTRATONUM": "000777", "CODIGO": "0777/26",
+                                             "VALCON": "1500", "DTASSI": "01/06/2026 00:00:00"}, mun)
+    assert cc.mesclar_portal(todos, [outro], mun) == (0, 1, 0)
+    assert len(todos) == 2
+
+
+def test_dedup_mesmo_contrato_em_dois_orgaos():
+    mun = MUNICIPIOS["IVINHEMA"]
+    a = cc.normalizar_contrato_pncp(BRUTO, mun)
+    b = cc.normalizar_contrato_pncp({**BRUTO, "orgaoEntidade": {"cnpj": "11112312000103", "razaoSocial": "FUNDO"},
+                                     "numeroContratoEmpenho": "000011", "sequencialContrato": 10,
+                                     "numeroControlePNCP": "b-2-10/2026"}, mun)
+    assert len(cc.deduplicar([a, b])) == 1
+
+
+def test_classificador_sem_falso_positivo_de_boilerplate():
+    assert not classificar("Divulgação e publicação dos atos oficiais, conforme Estudo Técnico Preliminar").tecnico
+    assert not classificar("Assessoria e consultoria técnica à Secretaria de Cultura e Esporte").tecnico
+
+
+def test_enriquecimento_preserva_link_do_portal():
+    mun = MUNICIPIOS["DOURADOS"]
+    c = cc.normalizar_contrato_pncp(BRUTO, mun)
+    cc.mesclar_portal([c], [cc.normalizar_contrato_fiorilli(REG_FIORILLI, mun)], mun)
+
+    class Vazio(cc.ClientePNCP):
+        def arquivos(self, *a): return [{"url": "https://x/1", "titulo": "Contrato", "tipoDocumentoNome": "Contrato"}]
+        def termos(self, *a): return []
+        def compra(self, *a): return None
+
+    cc.enriquecer_contrato(c, Vazio())
+    assert c["status_empenho"] == cc.STATUS_DOC_PORTAL and c["status_contrato"] == cc.STATUS_DOC_OK

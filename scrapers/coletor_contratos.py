@@ -13,9 +13,10 @@ Fluxo otimizado (requisições paralelas com ThreadPoolExecutor):
      enriquecimento, para economizar requisições;
   4. Enriquecimento só dos contratos técnicos: arquivos (Contrato, OS,
      Empenho), termos aditivos (vigência/valor) e modalidade da compra;
-  5. Conectores municipais (Betha, Fiorilli, Elotech, IPM, GovBR, Coplan)
-     complementam valores empenhados e links quando o município está
-     configurado em ``config.regioes_ms.PORTAIS_CONFIRMADOS``.
+  5. Portais da Transparência municipais com API de Dados Abertos (Fiorilli
+     SCPI, 39 municípios) — consultados em paralelo e fundidos ao PNCP SEM
+     duplicar: contratos já existentes no PNCP recebem valor empenhado,
+     liquidado e saldo; contratos ausentes do PNCP são incluídos.
 
 Regra de resiliência dos anexos: quando o documento não é localizado, o link
 aponta para a página de detalhamento do contrato e o status do anexo indica
@@ -37,7 +38,7 @@ import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
-from config.regioes_ms import UF, Municipio, normalizar_nome
+from config.regioes_ms import UF, Municipio
 from utils.classificador_tecnico import AREA_NAO_TECNICA, classificar
 
 log = logging.getLogger("fiscalizaobras.coletor")
@@ -357,7 +358,7 @@ def enriquecer_contrato(c: Dict[str, Any], cliente: ClientePNCP) -> Dict[str, An
         if achados[chave]:
             c[f"url_{chave}"] = achados[chave][0]["url"]
             c[f"status_{chave}"] = STATUS_DOC_OK
-        else:
+        elif c.get(f"status_{chave}") not in (STATUS_DOC_OK, STATUS_DOC_PORTAL):  # preserva dado do portal
             c[f"url_{chave}"] = c["url_pagina"]
             c[f"status_{chave}"] = STATUS_DOC_PAGINA if tem_anexos else STATUS_DOC_AUSENTE
     if achados["empenho"]:
@@ -401,14 +402,16 @@ def vincular_empenhos(tecnicos: List[Dict[str, Any]], todos: List[Dict[str, Any]
             idx.setdefault((c["_controle_compra"], c["_ni_fornecedor"]), []).append(c)
     for c in tecnicos:
         if _sem_acento(c.get("tipo_instrumento")).startswith("empenho"):
-            c["valor_empenhado"] = c["valor_global"]
+            if c.get("valor_empenhado") is None:
+                c["valor_empenhado"] = c["valor_global"]
             c["url_empenho"], c["status_empenho"] = c["url_pagina"], STATUS_DOC_OK
             continue
         emps = idx.get((c["_controle_compra"], c["_ni_fornecedor"]), [])
         if emps:
             c["empenhos"].extend({"descricao": f"Empenho {e['numero_contrato']}", "url": e["url_pagina"],
                                   "valor": e["valor_global"]} for e in emps)
-            c["valor_empenhado"] = sum(e["valor_global"] or 0 for e in emps)
+            if c.get("valor_empenhado") is None:
+                c["valor_empenhado"] = sum(e["valor_global"] or 0 for e in emps)
             if c["status_empenho"] != STATUS_DOC_OK:
                 c["url_empenho"], c["status_empenho"] = emps[0]["url_pagina"], STATUS_DOC_OK
 
@@ -435,197 +438,243 @@ def enriquecer_cnae(contratos: List[Dict[str, Any]]) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Conectores dos sistemas de transparência municipais
+# Portais da Transparência municipais — Fiorilli SCPI (API de Dados Abertos)
 # ---------------------------------------------------------------------------
-_CHAVES = {
-    "numero": ("numero", "nrcontrato", "numerocontrato", "contrato", "nr"),
-    "fornecedor": ("fornecedor", "contratado", "credor", "razaosocial", "nomefornecedor", "empresa"),
-    "cnpj": ("cnpj", "cpfcnpj", "cnpjcpf", "documento", "nicredor"),
-    "objeto": ("objeto", "descricao", "historico", "finalidade"),
-    "valor_global": ("valor", "valorcontrato", "valorglobal", "valortotal"),
-    "valor_empenhado": ("empenhado", "valorempenhado", "totalempenhado"),
-    "assinatura": ("assinatura", "dataassinatura", "data"),
-    "url": ("url", "link", "arquivo", "anexo"),
-}
+# Endpoint oficial documentado em <portal>/versaoJson/DadosAbertos/:
+#   GET /VersaoJson/LicitacoesEContratos/?ConectarExercicio={ano}&Listagem=Contratos
+#       &Ano={ano}&Empresa=1&MostraDadosConsolidado=True&ContratosApenasPublicados=False
+# Validado com dados reais (Corumbá e Ivinhema, 2026). Traz valor empenhado,
+# liquidado e saldo a empenhar — informação que o PNCP normalmente não tem.
+STATUS_DOC_PORTAL = "Disponível no Portal da Transparência"
+FONTE_FIORILLI = "Portal Fiorilli (SCPI)"
+TIMEOUT_PORTAL = (10, 120)
 
 
-def _chave_norm(k: str) -> str:
-    return re.sub(r"[^a-z]", "", _sem_acento(k))
+def _sessao_portal() -> requests.Session:
+    """Sessão para portais municipais: poucas tentativas (servidores podem estar fora do ar)."""
+    s = getattr(_local, "sessao_portal", None)
+    if s is None:
+        s = requests.Session()
+        s.headers.update({"User-Agent": USER_AGENT, "Accept": "application/json"})
+        retry = Retry(total=2, connect=1, read=1, backoff_factor=1.5, status_forcelist=(502, 503, 504),
+                      allowed_methods=frozenset({"GET"}))
+        adapter = HTTPAdapter(max_retries=retry)
+        s.mount("https://", adapter)
+        s.mount("http://", adapter)
+        _local.sessao_portal = s
+    return s
 
 
-def mapear_registro_generico(reg: Dict[str, Any]) -> Dict[str, Any]:
-    """Mapeia um registro de qualquer portal (JSON ou linha de tabela) para campos padrão."""
-    norm = {_chave_norm(k): v for k, v in reg.items()}
-    saida: Dict[str, Any] = {}
-    for campo, candidatos in _CHAVES.items():
-        for cand in candidatos:
-            hit = next((v for k, v in norm.items() if k == cand), None)
-            if hit is None:
-                hit = next((v for k, v in norm.items() if cand in k), None)
-            if hit not in (None, ""):
-                saida[campo] = hit
-                break
-    return saida
+def base_api_fiorilli(url_portal: str) -> Optional[str]:
+    """'http://host:8079/transparencia/Default.aspx' -> 'http://host:8079/transparencia'."""
+    m = re.match(r"(https?://[^/]+/transparencia)", url_portal or "", re.I)
+    return m.group(1) if m else None
 
 
-class ConectorMunicipal:
-    """Base dos conectores. Cada sistema implementa ``buscar_contratos``.
-
-    Os conectores são *best-effort*: endereços e formatos variam por
-    prefeitura/versão do sistema. Qualquer falha devolve lista vazia e o
-    painel segue apenas com o PNCP.
-    """
-
-    sistema = "GENERICO"
-    caminhos_html: Tuple[str, ...] = ("contratos", "transparencia/contratos")
-
-    def __init__(self, mun: Municipio):
-        self.mun = mun
-        self.base = mun.url_portal.rstrip("/")
-
-    def buscar_contratos(self, exercicio: int) -> List[Dict[str, Any]]:
-        for caminho in self.caminhos_html:
-            regs = self._raspar_tabela(f"{self.base}/{caminho}", {"exercicio": exercicio, "ano": exercicio})
-            if regs:
-                return regs
-        return []
-
-    def link_detalhe(self, numero: str = "") -> str:
-        return self.mun.url_portal
-
-    def _raspar_tabela(self, url: str, params: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
-        from bs4 import BeautifulSoup  # import tardio
-
-        try:
-            r = _sessao().get(url, params=params, timeout=(10, 40))
-            if r.status_code >= 400 or "html" not in r.headers.get("Content-Type", "html"):
-                return []
-        except requests.RequestException:
-            return []
-        soup = BeautifulSoup(r.text, "html.parser")
-        regs: List[Dict[str, Any]] = []
-        for tabela in soup.find_all("table"):
-            cab = [th.get_text(" ", strip=True) for th in tabela.find_all("th")]
-            if not cab or not any("contrat" in _sem_acento(h) or "objeto" in _sem_acento(h) for h in cab):
-                continue
-            for tr in tabela.find_all("tr"):
-                tds = tr.find_all("td")
-                if len(tds) < 2:
-                    continue
-                linha = {cab[i] if i < len(cab) else f"col{i}": td.get_text(" ", strip=True) for i, td in enumerate(tds)}
-                link = tr.find("a", href=True)
-                if link:
-                    linha["url"] = requests.compat.urljoin(r.url, link["href"])
-                regs.append(mapear_registro_generico(linha))
-        return regs
+def _cnpj_ou_cpf(valor: Any) -> str:
+    d = so_digitos(valor)
+    return d if len(d) in (11, 14) else ""
 
 
-class ConectorFiorilli(ConectorMunicipal):
-    """Fiorilli SCPI — Portal da Transparência com exportação JSON."""
+def normalizar_contrato_fiorilli(reg: Dict[str, Any], mun: Municipio) -> Dict[str, Any]:
+    """Converte um registro da listagem 'Contratos' do SCPI para o modelo do painel."""
+    ano = int(so_digitos(reg.get("ANO")) or 0) or None
+    num = so_digitos(reg.get("CONTRATONUM")).lstrip("0")
+    codigo = str(reg.get("CODIGO") or "").strip()
+    objeto = (reg.get("OBJETO_COMPLETO") or reg.get("OBJETO") or "").strip()
+    modalidade = (reg.get("LICIT") or reg.get("MODALI") or "").strip()
+    eh_obra = bool(str(reg.get("TIPOCOOBRA") or "").strip() or str(reg.get("NUMOBRA") or "").strip()
+                   or "OBRA" in str(reg.get("MODALI") or "").upper())
+    categoria = "Obras" if eh_obra else ""
+    cls = classificar(objeto, categoria)
+    vig_ini = _data(reg.get("VIGENI"))
+    vig_fim = _data(reg.get("VENCIMENTO_ATUAL")) or _data(reg.get("VIGENF"))
+    empenhado = sum(v for v in (_num(reg.get("EMPENHADOANT")), _num(reg.get("EMPENHADO"))) if v is not None)
+    tem_empenho = any(_num(reg.get(k)) is not None for k in ("EMPENHADOANT", "EMPENHADO"))
+    liquidado = sum(v for v in (_num(reg.get("LIQUIDADOANT")), _num(reg.get("LIQUIDADO"))) if v is not None)
+    saldo = _num(reg.get("SALDOEMPENHAR"))
+    situacao = SITUACAO_CONCLUIDO if _data(reg.get("DTENCERRAMENTO")) else _situacao(vig_ini, vig_fim, [objeto])
+    processo = str(reg.get("PROCLIC") or "").strip()
+    if reg.get("NUMLICMOD"):
+        processo = f"{processo} (Licitação {reg['NUMLICMOD']})".strip()
+    base = mun.url_portal
+    return {
+        "id": f"FIORILLI-{mun.codigo_ibge}-{reg.get('EMPRESA') or 0}-{codigo}-{ano}",
+        "municipio": mun.nome,
+        "codigo_ibge": mun.codigo_ibge,
+        "regiao": mun.rotulo_regiao,
+        "orgao": (reg.get("ENTIDADE") or "").strip(),
+        "cnpj_orgao": "",
+        "_cnpj_orgao": "",
+        "_ano": ano,
+        "_seq": None,
+        "_num_portal": num,
+        "_codigo_portal": so_digitos(codigo.split("/")[0]).lstrip("0"),
+        "numero_contrato": f"{num}/{ano}" if num and ano else codigo,
+        "tipo_instrumento": "Contrato",
+        "processo": processo,
+        "modalidade": modalidade.title(),
+        "categoria_pncp": categoria,
+        "fornecedor": (reg.get("FORNECEDOR") or "").strip(),
+        "cnpj_fornecedor": formatar_cnpj(reg.get("INSMF")),
+        "_ni_fornecedor": _cnpj_ou_cpf(reg.get("INSMF")),
+        "objeto": objeto,
+        "informacao_complementar": "",
+        "valor_global": _num(reg.get("VALCON")) or 0.0,
+        "valor_aditado": _num(reg.get("ADITADO")),
+        "valor_empenhado": empenhado if tem_empenho else None,
+        "valor_liquidado": liquidado if tem_empenho else None,
+        "saldo_a_empenhar": saldo,
+        "data_assinatura": _data(reg.get("DTASSI")),
+        "vigencia_inicio": vig_ini,
+        "vigencia_fim": vig_fim,
+        "situacao": situacao,
+        "area": cls.area,
+        "areas_secundarias": cls.areas_secundarias,
+        "pontuacao_tecnica": cls.pontuacao,
+        "motivo_classificacao": cls.motivo,
+        "fonte": FONTE_FIORILLI,
+        "numero_controle_pncp": "",
+        "_controle_compra": "",
+        "url_pagina": base,
+        "url_portal_municipal": base,
+        "url_contrato": base, "status_contrato": STATUS_DOC_PORTAL,
+        "url_os": base, "status_os": STATUS_DOC_PORTAL,
+        "url_empenho": base, "status_empenho": STATUS_DOC_PORTAL,
+        "empenhos": [],
+        "termos_aditivos": [],
+        "documentos": [],
+    }
+
+
+class ConectorFiorilli:
+    """Lê a listagem de contratos da API de Dados Abertos do Fiorilli SCPI."""
 
     sistema = "FIORILLI"
 
-    def buscar_contratos(self, exercicio: int) -> List[Dict[str, Any]]:
-        params = {"Listagem": "Contratos", "Empresa": 1, "Exercicio": exercicio,
-                  "DiaInicioPeriodo": "01", "MesInicialPeriodo": "01",
-                  "DiaFinalPeriodo": "31", "MesFinalPeriodo": "12", "MostrarFornecedor": "True"}
-        for caminho in ("VersaoJson/LicitacoesEContratos/", "Transparencia/VersaoJson/LicitacoesEContratos/"):
-            dados = _get_json_seguro(f"{self.base}/{caminho}", params)
-            if isinstance(dados, dict):
-                dados = next((v for v in dados.values() if isinstance(v, list)), None)
-            if isinstance(dados, list) and dados:
-                return [mapear_registro_generico(d) for d in dados if isinstance(d, dict)]
-        return super().buscar_contratos(exercicio)
-
-
-class ConectorElotech(ConectorMunicipal):
-    """Elotech OXY — portal com API REST pública."""
-
-    sistema = "ELOTECH"
+    def __init__(self, mun: Municipio):
+        self.mun = mun
+        self.base = base_api_fiorilli(mun.url_portal)
 
     def buscar_contratos(self, exercicio: int) -> List[Dict[str, Any]]:
-        for caminho in ("portaltransparencia-api/api/contratos", "api/contratos"):
-            dados = _get_json_seguro(f"{self.base}/{caminho}", {"entidade": 1, "exercicio": exercicio, "size": 500})
-            if isinstance(dados, dict):
-                dados = dados.get("content") or dados.get("data")
-            if isinstance(dados, list) and dados:
-                return [mapear_registro_generico(d) for d in dados if isinstance(d, dict)]
-        return []
-
-    def link_detalhe(self, numero: str = "") -> str:
-        return f"{self.base}/portaltransparencia/1/contratos"
-
-
-class ConectorIPM(ConectorMunicipal):
-    """IPM Sistemas (Atende.Net) — páginas HTML de transparência."""
-
-    sistema = "IPM"
-    caminhos_html = ("transparencia/item/contratos", "transparencia/contratos")
-
-
-class ConectorBetha(ConectorMunicipal):
-    """Betha Cloud — portal SPA; sem API pública estável sem chave da entidade.
-
-    Retorna vazio e direciona para o portal. Para habilitar, informe em
-    PORTAIS_CONFIRMADOS a URL de consulta de contratos da entidade.
-    """
-
-    sistema = "BETHA"
-
-    def buscar_contratos(self, exercicio: int) -> List[Dict[str, Any]]:
-        return []
-
-
-class ConectorGovBR(ConectorMunicipal):
-    sistema = "GOVBR"
-    caminhos_html = ("transparencia/contratos", "contratos", "portal-da-transparencia/contratos")
-
-
-class ConectorCoplan(ConectorMunicipal):
-    sistema = "COPLAN"
-    caminhos_html = ("transparencia/contratos", "contratos.php", "contratos")
-
-
-CONECTORES = {
-    "FIORILLI": ConectorFiorilli, "ELOTECH": ConectorElotech, "IPM": ConectorIPM,
-    "BETHA": ConectorBetha, "GOVBR": ConectorGovBR, "COPLAN": ConectorCoplan,
-}
-
-
-def _mesclar_portal(contratos: List[Dict[str, Any]], regs: List[Dict[str, Any]], conector: ConectorMunicipal) -> int:
-    """Complementa contratos PNCP com dados do portal municipal (empenhado/link)."""
-    mesclados = 0
-    for reg in regs:
-        num = so_digitos(str(reg.get("numero", "")).split("/")[0])
-        cnpj = so_digitos(reg.get("cnpj"))
-        for c in contratos:
-            if c["municipio"] != conector.mun.nome:
+        if not self.base:
+            return []
+        params = {"ConectarExercicio": exercicio, "Listagem": "Contratos", "Ano": exercicio, "Empresa": 1,
+                  "MostraDadosConsolidado": "True", "ContratosApenasPublicados": "False"}
+        r = _sessao_portal().get(f"{self.base}/VersaoJson/LicitacoesEContratos/", params=params,
+                                 timeout=TIMEOUT_PORTAL)
+        r.raise_for_status()
+        dados = r.json() if r.content else []
+        if isinstance(dados, dict):
+            dados = next((v for v in dados.values() if isinstance(v, list)), [])
+        saida, vistos = [], set()
+        for reg in dados or []:
+            if not isinstance(reg, dict) or str(reg.get("DTANULA") or "").strip():
+                continue  # anulados ficam de fora
+            if so_digitos(reg.get("ANO")) != str(exercicio):
                 continue
-            num_c = so_digitos(c["numero_contrato"].split("/")[0])
-            if num and num_c and num.lstrip("0") == num_c.lstrip("0") and (not cnpj or cnpj == c["_ni_fornecedor"]):
-                emp = _num(reg.get("valor_empenhado"))
-                if emp is not None:
-                    c["valor_empenhado"] = emp
-                if reg.get("url") and c["status_contrato"] != STATUS_DOC_OK:
-                    c["url_contrato"], c["status_contrato"] = reg["url"], STATUS_DOC_PAGINA
-                c["fonte"] = f"PNCP + {conector.sistema}"
-                mesclados += 1
-                break
-    return mesclados
+            chave = (reg.get("EMPRESA"), reg.get("CODIGO"), reg.get("ANO"))
+            if chave in vistos:  # duplicidade dentro do próprio portal
+                continue
+            vistos.add(chave)
+            saida.append(normalizar_contrato_fiorilli(reg, self.mun))
+        return saida
+
+
+CONECTORES = {"FIORILLI": ConectorFiorilli}
+
+
+def _mesmo_numero(portal: Dict[str, Any], c: Dict[str, Any]) -> bool:
+    num_c = so_digitos(str(c.get("numero_contrato", "")).split("/")[0]).lstrip("0")
+    return bool(num_c) and num_c in {portal.get("_num_portal"), portal.get("_codigo_portal")} - {""}
+
+
+def _mesmo_valor(a: Optional[float], b: Optional[float]) -> bool:
+    if not a or not b:
+        return False
+    return abs(a - b) <= max(1.0, 0.01 * max(a, b))
+
+
+def _pontuar_par(portal: Dict[str, Any], c: Dict[str, Any]) -> int:
+    pts = 0
+    if _mesmo_numero(portal, c):
+        pts += 3
+    if _mesmo_valor(portal["valor_global"], c.get("valor_global")):
+        pts += 2
+    if portal["data_assinatura"] and portal["data_assinatura"] == c.get("data_assinatura"):
+        pts += 1
+    return pts
+
+
+def _fundir(c: Dict[str, Any], p: Dict[str, Any]) -> None:
+    """Complementa o contrato do PNCP com os dados financeiros do portal municipal."""
+    for campo in ("valor_empenhado", "valor_liquidado", "saldo_a_empenhar", "valor_aditado"):
+        if p.get(campo) is not None:
+            c[campo] = p[campo]
+    if not c.get("modalidade"):
+        c["modalidade"] = p["modalidade"]
+    if p["situacao"] == SITUACAO_CONCLUIDO and c["situacao"] == SITUACAO_VIGENTE:
+        c["situacao"] = SITUACAO_CONCLUIDO
+    if c.get("status_empenho") != STATUS_DOC_OK:
+        c["url_empenho"], c["status_empenho"] = p["url_portal_municipal"], STATUS_DOC_PORTAL
+    c["url_portal_municipal"] = p["url_portal_municipal"]
+    c["numero_contrato_portal"] = p["numero_contrato"]
+    c["fonte"] = f"PNCP + {FONTE_FIORILLI}"
+
+
+def mesclar_portal(todos: List[Dict[str, Any]], registros: List[Dict[str, Any]], mun: Municipio) -> Tuple[int, int, int]:
+    """Funde registros do portal com os do PNCP SEM duplicar.
+
+    Regra (validada com dados reais): mesmo município + mesmo CNPJ/CPF da contratada
+    + pelo menos um entre nº do contrato, valor global (±1%) ou data de assinatura.
+    - casou com contrato PNCP ainda livre  -> complementa o registro PNCP (não cria novo);
+    - casou só com contrato PNCP já usado  -> duplicidade, descartado;
+    - não casou                           -> contrato ausente no PNCP, incluído com fonte do portal.
+    Retorna (vinculados, novos, descartados_por_duplicidade).
+    """
+    candidatos: Dict[str, List[Dict[str, Any]]] = {}
+    for c in todos:
+        if c["municipio"] == mun.nome and c["fonte"].startswith("PNCP") and c.get("_ni_fornecedor"):
+            candidatos.setdefault(c["_ni_fornecedor"], []).append(c)
+    usados: set = set()
+    vinculados = novos = descartados = 0
+    for p in registros:
+        melhor, melhor_pts, ja_usado = None, 0, False
+        for c in candidatos.get(p["_ni_fornecedor"], []) if p["_ni_fornecedor"] else []:
+            pts = _pontuar_par(p, c)
+            if pts == 0:
+                continue
+            if c["id"] in usados:
+                ja_usado = ja_usado or pts >= 3
+                continue
+            if pts > melhor_pts:
+                melhor, melhor_pts = c, pts
+        if melhor is not None:
+            _fundir(melhor, p)
+            usados.add(melhor["id"])
+            vinculados += 1
+        elif ja_usado:
+            descartados += 1
+        else:
+            todos.append(p)
+            novos += 1
+    return vinculados, novos, descartados
 
 
 def deduplicar(contratos: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Remove publicações duplicadas do mesmo contrato no PNCP.
 
-    Alguns órgãos publicam o mesmo instrumento mais de uma vez (ex.: "000064/2026"
-    e "64/2026"), o que inflaria os totais. Chave: órgão + nº normalizado +
-    fornecedor + valor global. Mantém o de maior sequencial (publicação mais recente).
+    Há publicações repetidas do mesmo instrumento (ex.: "000064/2026" e "64/2026",
+    ou o mesmo contrato publicado pela Prefeitura e pelo Fundo Municipal), o que
+    inflaria os totais. Chave: município + nº normalizado + contratada + valor +
+    data de assinatura. Mantém o de maior sequencial (publicação mais recente).
     """
     escolhidos: Dict[Tuple[Any, ...], Dict[str, Any]] = {}
     for c in contratos:
         num = so_digitos(c["numero_contrato"].split("/")[0]).lstrip("0")
-        chave = (c["_cnpj_orgao"], num, c["_ano"], c["_ni_fornecedor"], round(c["valor_global"] or 0, 2),
-                 _sem_acento(c["tipo_instrumento"])[:8])
+        # sem o CNPJ do órgão: o mesmo contrato às vezes é publicado pela Prefeitura E pelo Fundo
+        chave = (c["municipio"], num, c["_ano"], c["_ni_fornecedor"], round(c["valor_global"] or 0, 2),
+                 c["data_assinatura"], _sem_acento(c["tipo_instrumento"])[:8])
         atual = escolhidos.get(chave)
         if atual is None or (c["_seq"] or 0) > (atual["_seq"] or 0):
             escolhidos[chave] = c
@@ -641,7 +690,8 @@ class ResultadoColeta:
     total_bruto: int = 0
     orgaos: List[OrgaoMunicipal] = field(default_factory=list)
     avisos: List[str] = field(default_factory=list)
-    municipios_sem_orgao: List[str] = field(default_factory=list)
+    municipios_sem_orgao: List[str] = field(default_factory=list)  # sem dados no PNCP nem no portal
+    total_portal: int = 0
 
 
 Progresso = Callable[[float, str], None]
@@ -654,68 +704,93 @@ def coletar_contratos(
     enriquecer_cnae_fornecedor: bool = False,
     progresso: Optional[Progresso] = None,
 ) -> ResultadoColeta:
-    """Coleta, classifica e enriquece os contratos dos municípios selecionados."""
+    """Coleta (PNCP + portais municipais), deduplica, classifica e enriquece os contratos."""
     prog = progresso or (lambda f, m: None)
     cliente = ClientePNCP()
     res = ResultadoColeta()
+    municipios = list({m.nome: m for m in municipios}.values())  # sem município repetido
 
-    # 1) Descoberta de órgãos municipais -----------------------------------
-    prog(0.02, f"Descobrindo órgãos municipais em {len(municipios)} município(s)…")
-    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
-        futuros = {ex.submit(cliente.descobrir_orgaos, m, exercicio): m for m in municipios}
-        for fut in as_completed(futuros):
-            m = futuros[fut]
-            try:
-                orgs = fut.result()
-            except Exception as exc:  # noqa: BLE001
-                res.avisos.append(f"{m.nome}: falha na descoberta de órgãos no PNCP ({exc}).")
-                orgs = []
-            if not orgs:
-                res.municipios_sem_orgao.append(m.nome)
-            res.orgaos.extend(orgs)
+    # 0) Portais municipais com API (em paralelo ao PNCP) -------------------
+    ex_portais = ThreadPoolExecutor(max_workers=MAX_WORKERS)
+    fut_portais = {
+        ex_portais.submit(CONECTORES[m.sistema](m).buscar_contratos, exercicio): m
+        for m in municipios if m.sistema in CONECTORES
+    }
 
-    # 2) Contratos por órgão -----------------------------------------------
-    por_nome = {m.nome: m for m in municipios}
-    brutos: List[Tuple[Dict[str, Any], Municipio]] = []
-    total = max(len(res.orgaos), 1)
-    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
-        futuros = {ex.submit(cliente.contratos_do_orgao, o.cnpj, exercicio): o for o in res.orgaos}
-        for i, fut in enumerate(as_completed(futuros), 1):
-            o = futuros[fut]
-            prog(0.05 + 0.55 * i / total, f"Contratos de {o.razao_social[:45]} ({i}/{total})")
-            try:
-                itens = fut.result()
-            except Exception as exc:  # noqa: BLE001
-                res.avisos.append(f"{o.razao_social}: não foi possível ler os contratos ({exc}).")
+    try:
+        # 1) Descoberta de órgãos municipais no PNCP ------------------------
+        prog(0.02, f"Descobrindo órgãos municipais em {len(municipios)} município(s)…")
+        with ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
+            futuros = {ex.submit(cliente.descobrir_orgaos, m, exercicio): m for m in municipios}
+            for fut in as_completed(futuros):
+                m = futuros[fut]
+                try:
+                    res.orgaos.extend(fut.result())
+                except Exception as exc:  # noqa: BLE001
+                    res.avisos.append(f"{m.nome}: falha na descoberta de órgãos no PNCP ({exc}).")
+
+        # 2) Contratos por órgão --------------------------------------------
+        por_nome = {m.nome: m for m in municipios}
+        brutos: List[Tuple[Dict[str, Any], Municipio]] = []
+        total = max(len(res.orgaos), 1)
+        with ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
+            futuros = {ex.submit(cliente.contratos_do_orgao, o.cnpj, exercicio): o for o in res.orgaos}
+            for i, fut in enumerate(as_completed(futuros), 1):
+                o = futuros[fut]
+                prog(0.05 + 0.5 * i / total, f"PNCP: contratos de {o.razao_social[:45]} ({i}/{total})")
+                try:
+                    itens = fut.result()
+                except Exception as exc:  # noqa: BLE001
+                    res.avisos.append(f"{o.razao_social}: não foi possível ler os contratos no PNCP ({exc}).")
+                    continue
+                for b in itens:
+                    brutos.append((b, por_nome[o.municipio]))
+        res.total_bruto = len(brutos)
+
+        # 3) Normalização + filtro do exercício + deduplicação PNCP ---------
+        vistos = set()
+        todos: List[Dict[str, Any]] = []
+        for b, m in brutos:
+            c = normalizar_contrato_pncp(b, m)
+            if c["id"] in vistos:
                 continue
-            for b in itens:
-                brutos.append((b, por_nome[o.municipio]))
-    res.total_bruto = len(brutos)
+            vistos.add(c["id"])
+            ano_ass = c["data_assinatura"].year if c["data_assinatura"] else None
+            if c["_ano"] != exercicio and ano_ass != exercicio:
+                continue
+            todos.append(c)
+        todos = deduplicar(todos)
 
-    # 3) Normalização + classificação + filtro do exercício ---------------
-    vistos = set()
-    todos: List[Dict[str, Any]] = []
-    for b, m in brutos:
-        c = normalizar_contrato_pncp(b, m)
-        if c["id"] in vistos:
-            continue
-        vistos.add(c["id"])
-        ano_ass = c["data_assinatura"].year if c["data_assinatura"] else None
-        if c["_ano"] != exercicio and ano_ass != exercicio:
-            continue
-        todos.append(c)
+        # 4) Fusão com os portais municipais (sem duplicar) -----------------
+        n_fut = max(len(fut_portais), 1)
+        for i, fut in enumerate(as_completed(fut_portais), 1):
+            m = fut_portais[fut]
+            prog(0.56 + 0.04 * i / n_fut, f"Portal da Transparência de {m.nome.title()} ({i}/{len(fut_portais)})")
+            try:
+                regs = fut.result()
+            except Exception as exc:  # noqa: BLE001
+                res.avisos.append(f"{m.nome.title()}: portal da transparência indisponível agora "
+                                  f"({type(exc).__name__}); mantidos apenas os dados do PNCP.")
+                continue
+            vinc, novos, desc = mesclar_portal(todos, regs, m)
+            res.total_portal += len(regs)
+            res.avisos.append(f"{m.nome.title()} (Fiorilli): {len(regs)} contrato(s) no portal — {vinc} já "
+                              f"no PNCP (complementados), {novos} incluído(s) só do portal"
+                              + (f", {desc} duplicado(s) descartado(s)." if desc else "."))
+    finally:
+        ex_portais.shutdown(wait=False, cancel_futures=True)
 
-    todos = deduplicar(todos)
+    com_dados = {c["municipio"] for c in todos}
+    res.municipios_sem_orgao = sorted(m.nome for m in municipios if m.nome not in com_dados)
+
     tecnicos = [c for c in todos if incluir_nao_tecnicos or c["area"] != AREA_NAO_TECNICA]
     tecnicos.sort(key=lambda c: c["valor_global"] or 0, reverse=True)
-    if len(tecnicos) > MAX_ENRIQUECIMENTO:
-        res.avisos.append(
-            f"{len(tecnicos)} contratos técnicos; anexos detalhados buscados para os "
-            f"{MAX_ENRIQUECIMENTO} de maior valor (demais com link para a página do contrato)."
-        )
 
-    # 4) Enriquecimento (anexos, termos, modalidade) ------------------------
-    alvo = tecnicos[:MAX_ENRIQUECIMENTO]
+    # 5) Enriquecimento PNCP (anexos, termos, modalidade) -------------------
+    alvo = [c for c in tecnicos if c.get("_cnpj_orgao")][:MAX_ENRIQUECIMENTO]
+    if len([c for c in tecnicos if c.get("_cnpj_orgao")]) > MAX_ENRIQUECIMENTO:
+        res.avisos.append(f"Anexos do PNCP buscados para os {MAX_ENRIQUECIMENTO} contratos de maior valor "
+                          f"(demais com link para a página do contrato).")
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
         futuros = [ex.submit(enriquecer_contrato, c, cliente) for c in alvo]
         for i, fut in enumerate(as_completed(futuros), 1):
@@ -727,19 +802,6 @@ def coletar_contratos(
                 log.warning("Falha ao enriquecer contrato: %s", exc)
     vincular_empenhos(tecnicos, todos)
 
-    # 5) Conectores municipais ---------------------------------------------
-    for m in municipios:
-        if not m.sistema or m.sistema not in CONECTORES:
-            continue
-        prog(0.92, f"Consultando portal {m.sistema} de {m.nome}…")
-        conector = CONECTORES[m.sistema](m)
-        try:
-            regs = conector.buscar_contratos(exercicio)
-            n = _mesclar_portal(tecnicos, regs, conector)
-            res.avisos.append(f"{m.nome} ({m.sistema}): {len(regs)} registro(s) no portal, {n} vinculado(s).")
-        except Exception as exc:  # noqa: BLE001
-            res.avisos.append(f"{m.nome} ({m.sistema}): conector indisponível ({exc}).")
-
     if enriquecer_cnae_fornecedor and tecnicos:
         prog(0.95, "Consultando CNAE das contratadas (BrasilAPI)…")
         enriquecer_cnae(tecnicos)
@@ -747,16 +809,16 @@ def coletar_contratos(
             tecnicos = [c for c in tecnicos if c["area"] != AREA_NAO_TECNICA]
 
     for c in tecnicos:
-        if c["valor_empenhado"] is not None:
+        if c.get("saldo_a_empenhar") is None and c.get("valor_empenhado") is not None:
             c["saldo_a_empenhar"] = max((c["valor_global"] or 0) - c["valor_empenhado"], 0.0)
 
     res.contratos = tecnicos
-    prog(1.0, f"Concluído: {len(tecnicos)} contrato(s) técnico(s) de {res.total_bruto} publicados.")
+    prog(1.0, f"Concluído: {len(tecnicos)} contrato(s) técnico(s).")
     return res
 
 
 __all__ = [
     "ClientePNCP", "ResultadoColeta", "coletar_contratos", "formatar_cnpj", "SITUACOES",
-    "SITUACAO_VIGENTE", "SITUACAO_PARALISADO", "SITUACAO_CONCLUIDO",
-    "STATUS_DOC_OK", "STATUS_DOC_PAGINA", "STATUS_DOC_AUSENTE", "CONECTORES", "normalizar_nome",
+    "SITUACAO_VIGENTE", "SITUACAO_PARALISADO", "SITUACAO_CONCLUIDO", "STATUS_DOC_OK", "STATUS_DOC_PAGINA",
+    "STATUS_DOC_AUSENTE", "STATUS_DOC_PORTAL", "CONECTORES", "ConectorFiorilli", "mesclar_portal",
 ]

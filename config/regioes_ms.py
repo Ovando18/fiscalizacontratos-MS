@@ -8,21 +8,16 @@ Contém:
   * URL base do site/portal da transparência e o sistema de transparência
     utilizado (quando conhecido), usados pelos conectores municipais.
 
-Observação sobre URLs e sistemas
---------------------------------
-Os portais municipais mudam de fornecedor e de endereço com frequência.
-Por isso a URL padrão segue o domínio oficial ``<slug>.ms.gov.br`` e o campo
-``sistema`` fica ``None`` (somente PNCP) até ser confirmado. Para ativar um
-conector específico (Betha, Fiorilli, Elotech, IPM, GovBR, Coplan), preencha
-``PORTAIS_CONFIRMADOS`` abaixo com a URL real do portal e o sistema.
-Use ``python scripts/verificar_portais.py`` para checar quais URLs respondem.
+Os endereços dos portais vêm da planilha fornecida pela fiscalização. Para
+alterar um portal, edite ``PORTAIS_TRANSPARENCIA``; para checar quais
+respondem, rode ``python scripts/verificar_portais.py``.
 """
 
 from __future__ import annotations
 
 import unicodedata
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 UF = "MS"
 CODIGO_UF_IBGE = "50"
@@ -145,20 +140,104 @@ REGIOES: Dict[int, List[str]] = {
 OPCAO_TODOS_REGIAO = "TODOS OS MUNICÍPIOS DA REGIÃO"
 
 # ---------------------------------------------------------------------------
-# Sistemas de transparência suportados pelos conectores
+# Portais da Transparência municipais (fonte: planilha "Transparências MS
+# completo", fornecida pela equipe de fiscalização — 79 municípios)
 # ---------------------------------------------------------------------------
-SISTEMAS_SUPORTADOS = ("BETHA", "FIORILLI", "ELOTECH", "IPM", "GOVBR", "COPLAN")
+# Sistema identificado pela URL:
+#   FIORILLI  — SCPI 9.0: possui API pública de Dados Abertos (JSON), integrada
+#               ao coletor (contratos, valor empenhado, liquidado e saldo).
+#   BETHA, QUALITY, MEGASOFT, CR2, OUTRO — usados como link oficial do portal
+#               (sem API validada; não são raspados para evitar dados errados).
+# Observação: as URLs de NOVA ANDRADINA (domínio .ms.leg.br) e NOVO HORIZONTE
+# DO SUL ("camara_municipal") apontam para portais da Câmara Municipal.
+SISTEMA_FIORILLI = "FIORILLI"
+SISTEMAS_CONHECIDOS = ("FIORILLI", "BETHA", "QUALITY", "MEGASOFT", "CR2", "OUTRO")
 
-# Preencha aqui os portais já confirmados (URL real + sistema + CNPJ da prefeitura).
-# Exemplo:
-#   "NOME DO MUNICÍPIO": {
-#       "url_portal": "https://<endereco-real-do-portal>/",
-#       "sistema": "FIORILLI",
-#       "cnpj_prefeitura": "00000000000000",
-#   },
-# Enquanto não houver entrada, o município é consultado somente via PNCP
-# (fonte oficial nacional), com o site oficial como link de referência.
-PORTAIS_CONFIRMADOS: Dict[str, Dict[str, Optional[str]]] = {}
+PORTAIS_TRANSPARENCIA: Dict[str, Tuple[str, str]] = {
+    "ÁGUA CLARA": ("FIORILLI", "http://45.183.236.226:8079/transparencia/"),
+    "ALCINÓPOLIS": ("FIORILLI", "http://45.173.125.13:8079/transparencia/"),
+    "AMAMBAI": ("FIORILLI", "http://177.67.190.178:5656/transparencia/"),
+    "ANASTÁCIO": ("MEGASOFT", "https://anastacio.megasofttransparencia.com.br/"),
+    "ANAURILÂNDIA": ("OUTRO", "http://portaltransparenciaanaurilandia.ddns.com.br:8181/"),
+    "ANGÉLICA": ("BETHA", "https://transparencia.betha.cloud/#/3CsimkdlAFWc2SxNasIRBA=="),
+    "ANTÔNIO JOÃO": ("QUALITY", "https://web.qualitysistemas.com.br/portal/transparencia_publica/prefeitura_municipal_de_antonio_joao"),
+    "APARECIDA DO TABOADO": ("FIORILLI", "http://143.0.127.202:8079/transparencia/"),
+    "AQUIDAUANA": ("BETHA", "https://e-gov.betha.com.br/transparencia/01037-173/recursos.faces?mun=tR-qJvZ6sQY="),
+    "ARAL MOREIRA": ("FIORILLI", "http://177.73.104.13:8079/transparencia/"),
+    "BANDEIRANTES": ("QUALITY", "https://web.qualitysistemas.com.br/portal/prefeitura_municipal_de_bandeirantes"),
+    "BATAGUASSU": ("FIORILLI", "http://45.182.157.6:8079/transparencia/"),
+    "BATAYPORÃ": ("OUTRO", "https://www.publicacoesmunicipais.inf.br/transparencia/bataypora"),
+    "BELA VISTA": ("FIORILLI", "http://191.5.174.198:8079/transparencia/"),
+    "BODOQUENA": ("BETHA", "https://transparencia.betha.cloud/#/9thTqEHpf4m-Nn7nTliYbw=="),
+    "BONITO": ("FIORILLI", "http://45.188.183.155:8079/transparencia/"),
+    "BRASILÂNDIA": ("FIORILLI", "http://187.17.197.14:8079/transparencia/"),
+    "CAARAPÓ": ("BETHA", "https://transparencia.betha.cloud/#/61M0eJ_21GlQw6p7f3svmg=="),
+    "CAMAPUÃ": ("QUALITY", "https://web.qualitysistemas.com.br/portal/municipio_de_camapua"),
+    "CAMPO GRANDE": ("OUTRO", "https://transparencia.campogrande.ms.gov.br/"),
+    "CARACOL": ("QUALITY", "https://web.qualitysistemas.com.br/portal/transparencia_publica/prefeitura_municipal_de_caracol"),
+    "CASSILÂNDIA": ("FIORILLI", "http://45.189.53.3:8076/transparencia/"),
+    "CHAPADÃO DO SUL": ("FIORILLI", "https://pmchapadao.rcmsuporte.com.br/transparencia/"),
+    "CORGUINHO": ("QUALITY", "https://web.qualitysistemas.com.br/portal/transparencia_publica/prefeitura_municipal_de_corguinho"),
+    "CORONEL SAPUCAIA": ("FIORILLI", "https://coronelsapucaia.rcmsuporte.com.br:8079/transparencia/"),
+    "CORUMBÁ": ("FIORILLI", "https://scpi.corumba.ms.gov.br/transparencia/"),
+    "COSTA RICA": ("FIORILLI", "http://pmcostarica.rcmsuporte.com.br:8079/transparencia/"),
+    "COXIM": ("FIORILLI", "http://pmcoxim.rcmsuporte.com.br:8079/transparencia/Default.aspx"),
+    "DEODÁPOLIS": ("BETHA", "https://transparencia.betha.cloud/#/whlvWPlYqIFeODuQD0dKgA=="),
+    "DOIS IRMÃOS DO BURITI": ("FIORILLI", "http://transparencia.doisirmaosdoburiti.ms.gov.br:8079/transparencia/"),
+    "DOURADINA": ("OUTRO", "http://portaltransparenciadouradina.ddns.com.br/"),
+    "DOURADOS": ("BETHA", "https://transparencia.betha.cloud/#/yJ9y3J_D09niojsx99D7Dw=="),
+    "ELDORADO": ("FIORILLI", "https://scpi.eldorado.rcmsuporte.com.br/transparencia/"),
+    "FÁTIMA DO SUL": ("BETHA", "https://e-gov.betha.com.br/transparencia/01037-173/recursos.faces?mun=jIUn5a88xr8="),
+    "FIGUEIRÃO": ("OUTRO", "https://www.figueirao.ms.gov.br/portal-da-transparencia/"),
+    "GLÓRIA DE DOURADOS": ("FIORILLI", "http://177.73.106.211:5656/Transparencia/"),
+    "GUIA LOPES DA LAGUNA": ("FIORILLI", "http://45.171.204.95:8079/transparencia/"),
+    "IGUATEMI": ("CR2", "https://www.portalcr2.com.br/entidade/iguatemi"),
+    "INOCÊNCIA": ("FIORILLI", "http://179.125.63.161:8079/transparencia/"),
+    "ITAPORÃ": ("FIORILLI", "https://transparencia.itapora.ms.gov.br/Transparencia/"),
+    "ITAQUIRAÍ": ("BETHA", "https://e-gov.betha.com.br/transparencia/01037-173/recursos.faces?mun=QKBgJkx3Atw="),
+    "IVINHEMA": ("FIORILLI", "https://transparencia.ivinhema.ms.gov.br/transparencia/"),
+    "JAPORÃ": ("FIORILLI", "http://181.191.195.74:5656/transparencia/"),
+    "JARAGUARI": ("FIORILLI", "http://pmjaraguari.rcmsuporte.com.br:8079/transparencia/"),
+    "JARDIM": ("OUTRO", "http://200.209.160.172:4545/index"),
+    "JATEÍ": ("OUTRO", "https://transparencia-ocmblue.com.br/jatei"),
+    "JUTI": ("FIORILLI", "http://177.73.104.96:5656/transparencia/"),
+    "LADÁRIO": ("OUTRO", "https://www.ladario.ms.gov.br/portal/transparencia"),
+    "LAGUNA CARAPÃ": ("BETHA", "https://transparencia.betha.cloud/#/Qamj9G2f8WhljKQKjl9BnQ=="),
+    "MARACAJU": ("OUTRO", "https://www.maracaju.ms.gov.br/portal/transparencia"),
+    "MIRANDA": ("FIORILLI", "http://168.228.168.93:5656/transparencia/"),
+    "MUNDO NOVO": ("BETHA", "https://transparencia.betha.cloud/#/S0vZYp2x1AO4UFMuI6vo6w=="),
+    "NAVIRAÍ": ("OUTRO", "https://transparencia.navirai.ms.gov.br/"),
+    "NIOAQUE": ("QUALITY", "https://web.qualitysistemas.com.br/portal/transparencia_publica/prefeitura_municipal_de_nioaque"),
+    "NOVA ALVORADA DO SUL": ("FIORILLI", "https://transparencia.novaalvoradadosul.ms.gov.br/transparencia/"),
+    "NOVA ANDRADINA": ("OUTRO", "https://www.novaandradina.ms.leg.br/transparencia/pagina-de-links/transparencia"),
+    "NOVO HORIZONTE DO SUL": ("QUALITY", "https://web.qualitysistemas.com.br/portal/transparencia_publica/camara_municipal_de_novo_horizonte_do_sul"),
+    "PARAÍSO DAS ÁGUAS": ("FIORILLI", "http://170.81.37.97:8079/transparencia/"),
+    "PARANAÍBA": ("FIORILLI", "http://45.184.83.32:8079/Transparencia/"),
+    "PARANHOS": ("FIORILLI", "http://45.179.174.190:8079/transparencia/"),
+    "PEDRO GOMES": ("FIORILLI", "http://45.6.108.122:5656/transparencia/"),
+    "PONTA PORÃ": ("FIORILLI", "https://contabilidade.pontapora.ms.gov.br/transparencia/"),
+    "PORTO MURTINHO": ("BETHA", "https://e-gov.betha.com.br/transparencia/01037-173/recursos.faces"),
+    "RIBAS DO RIO PARDO": ("FIORILLI", "http://45.174.220.245:8079/transparencia/"),
+    "RIO BRILHANTE": ("BETHA", "https://transparencia.betha.cloud/#/KLojapoJwJLapEYmhbLUHQ=="),
+    "RIO NEGRO": ("QUALITY", "https://web.qualitysistemas.com.br/portal/transparencia_publica/prefeitura_municipal_de_rio_negro"),
+    "RIO VERDE DE MATO GROSSO": ("BETHA", "https://transparencia.betha.cloud/#/KlxQinrZBH80Uqv9BDVJaw=="),
+    "ROCHEDO": ("QUALITY", "https://web.qualitysistemas.com.br/contratos_e_convenios/prefeitura_municipal_de_rochedo"),
+    "SANTA RITA DO PARDO": ("CR2", "https://santaritadopardo.cr2.site/"),
+    "SÃO GABRIEL DO OESTE": ("FIORILLI", "https://appsaogabriel.rcmsuporte.com.br:8086/transparencia/"),
+    "SELVÍRIA": ("FIORILLI", "http://45.186.221.158:5656/transparencia/"),
+    "SETE QUEDAS": ("FIORILLI", "http://transparencia.setequedas.ms.gov.br:8079/transparencia/"),
+    "SIDROLÂNDIA": ("FIORILLI", "http://187.6.86.78:5656/transparencia/"),
+    "SONORA": ("FIORILLI", "http://pmsonora.rcmsuporte.com.br:8079/transparencia/"),
+    "TACURU": ("MEGASOFT", "https://tacuru.megasofttransparencia.com.br/"),
+    "TAQUARUSSU": ("BETHA", "https://transparencia.betha.cloud/#/_VQj5BoEPGmm_VeoePaAKg=="),
+    "TERENOS": ("QUALITY", "https://web.qualitysistemas.com.br/portal/transparencia_publica/prefeitura_municipal_de_terenos"),
+    "TRÊS LAGOAS": ("FIORILLI", "http://pmtreslagoas.rcmsuporte.com.br:8079/transparencia/"),
+    "VICENTINA": ("OUTRO", "http://portaltransparenciavicentina.ddns.com.br/"),
+}
+
+# Sobrescritas opcionais (ex.: CNPJ da prefeitura para acelerar a descoberta no PNCP)
+#   "NOME DO MUNICÍPIO": {"cnpj_prefeitura": "00000000000000"}
+AJUSTES_MUNICIPIOS: Dict[str, Dict[str, Optional[str]]] = {}
 
 
 def remover_acentos(texto: str) -> str:
@@ -196,15 +275,15 @@ class Municipio:
 
 
 def _montar_municipio(nome: str, regiao: Optional[int]) -> Municipio:
-    conf = PORTAIS_CONFIRMADOS.get(nome, {})
-    url = conf.get("url_portal") or f"https://www.{slug_municipio(nome)}.ms.gov.br/"
+    sistema, url = PORTAIS_TRANSPARENCIA.get(nome, (None, f"https://www.{slug_municipio(nome)}.ms.gov.br/"))
+    ajuste = AJUSTES_MUNICIPIOS.get(nome, {})
     return Municipio(
         nome=nome,
         codigo_ibge=CODIGOS_IBGE[nome],
         regiao=regiao,
         url_portal=url,
-        sistema=(conf.get("sistema") or None),
-        cnpj_prefeitura=(conf.get("cnpj_prefeitura") or None),
+        sistema=sistema,
+        cnpj_prefeitura=(ajuste.get("cnpj_prefeitura") or None),
     )
 
 
@@ -250,4 +329,12 @@ def validar_base() -> List[str]:
             problemas.append(f"Código IBGE inválido para {nome}: {cod}")
     if len(set(CODIGOS_IBGE.values())) != len(CODIGOS_IBGE):
         problemas.append("Há códigos IBGE duplicados")
+    sem_portal = set(CODIGOS_IBGE) - set(PORTAIS_TRANSPARENCIA)
+    if sem_portal:
+        problemas.append(f"Municípios sem portal configurado: {sorted(sem_portal)}")
+    for nome, (sistema, url) in PORTAIS_TRANSPARENCIA.items():
+        if nome not in CODIGOS_IBGE:
+            problemas.append(f"Portal para município desconhecido: {nome}")
+        if sistema not in SISTEMAS_CONHECIDOS or not url.startswith(("http://", "https://")):
+            problemas.append(f"Portal inválido para {nome}: {sistema} {url}")
     return problemas

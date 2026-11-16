@@ -196,7 +196,7 @@ st.markdown(
     <p>Inteligência para fiscalização de contratos de Engenharia, Agronomia e Geociências
        nos municípios de Mato Grosso do Sul</p>
   </div>
-  <span class="fo-selo">Fonte oficial: PNCP • Lei 14.133/2021</span>
+  <span class="fo-selo">Fontes: PNCP + Portais da Transparência</span>
 </div>
 """,
     unsafe_allow_html=True,
@@ -271,7 +271,7 @@ with st.sidebar:
 
     pesquisar = st.button("🔎 Pesquisar contratos", type="primary", width="stretch")
     st.caption("Dados públicos do Portal Nacional de Contratações Públicas (PNCP), "
-               "complementados pelos portais municipais configurados.")
+               "complementados pelos Portais da Transparência municipais (API Fiorilli).")
 
 # Municípios efetivamente selecionados (sem duplicidade, mantendo ordem)
 nomes_selecionados = list(dict.fromkeys(fixos_sel + municipios_regiao_sel))
@@ -359,14 +359,15 @@ st.markdown(
 k1, k2, k3, k4 = st.columns(4)
 k1.markdown(f'<div class="fo-kpi"><div class="rotulo">Contratos encontrados</div>'
             f'<div class="valor">{len(filtrados):,}</div>'
-            f'<div class="nota">de {resultado.total_bruto:,} publicados no PNCP</div></div>'.replace(",", "."),
+            f'<div class="nota">{resultado.total_bruto:,} no PNCP + {getattr(resultado, "total_portal", 0):,} nos portais'
+            f'</div></div>'.replace(",", "."),
             unsafe_allow_html=True)
 k2.markdown(f'<div class="fo-kpi"><div class="rotulo">Valor global contratado</div>'
             f'<div class="valor">{brl_compacto(total_global)}</div>'
             f'<div class="nota">{brl(total_global)}</div></div>', unsafe_allow_html=True)
 k3.markdown(f'<div class="fo-kpi verde"><div class="rotulo">Total empenhado</div>'
             f'<div class="valor">{brl_compacto(total_emp) if emp_vals else "n/d"}</div>'
-            f'<div class="nota">{len(emp_vals)} com empenho no PNCP</div></div>',
+            f'<div class="nota">{len(emp_vals)} com empenho identificado</div></div>',
             unsafe_allow_html=True)
 k4.markdown(f'<div class="fo-kpi verde"><div class="rotulo">Municípios com obras ativas</div>'
             f'<div class="valor">{len(mun_ativos)}</div>'
@@ -375,7 +376,7 @@ k4.markdown(f'<div class="fo-kpi verde"><div class="rotulo">Municípios com obra
 
 if resultado.municipios_sem_orgao:
     st.markdown(
-        '<div class="fo-alerta">Sem publicações municipais no PNCP para o exercício: '
+        '<div class="fo-alerta">Sem contratos localizados no PNCP nem no portal municipal para o exercício: '
         + ", ".join(n.title() for n in sorted(resultado.municipios_sem_orgao))
         + '. Consulte o portal da transparência local.</div>', unsafe_allow_html=True)
 if resultado.avisos:
@@ -451,7 +452,8 @@ st.dataframe(
         "Empenho": st.column_config.LinkColumn(display_text="💰 Abrir"),
     },
 )
-st.caption("Quando o anexo não está publicado, o link abre a página de detalhamento do contrato no PNCP. "
+st.caption("Quando o anexo não está publicado, o link abre a página do contrato no PNCP ou o Portal da "
+           "Transparência do município. "
            "O status de cada anexo aparece no Inspetor e na planilha.")
 
 filtros_export = {
@@ -513,6 +515,7 @@ st.markdown(
     {campo("Área de fiscalização", c['area'])}
     {campo("Valor global", brl(c['valor_global']))}
     {campo("Valor empenhado", brl(c['valor_empenhado']))}
+    {campo("Valor liquidado", brl(c.get('valor_liquidado')))}
     {campo("Saldo a empenhar", brl(saldo) if saldo is not None else 'n/d (empenhos não publicados)')}
     {campo("Data de assinatura", dt(c['data_assinatura']))}
     {campo("Vigência", f"{dt(c['vigencia_inicio'])} a {dt(c['vigencia_fim'])}")}
@@ -556,6 +559,7 @@ with d2:
         st.markdown(f"- 💰 [{esc(e['descricao'])}]({e['url']}){valor}")
     for t in c.get("termos_aditivos") or []:
         st.markdown(f"- 📝 Termo {esc(t['numero'])} ({dt(t['assinatura'])}): {esc((t['objeto'] or '')[:160])}")
-    st.link_button("🔗 Página do contrato no PNCP", c["url_pagina"], width="stretch")
-    st.link_button(f"🏛️ Site oficial de {c['municipio'].title()}", c["url_portal_municipal"],
+    if c["url_pagina"].startswith("https://pncp.gov.br"):
+        st.link_button("🔗 Página do contrato no PNCP", c["url_pagina"], width="stretch")
+    st.link_button(f"🏛️ Portal da Transparência de {c['municipio'].title()}", c["url_portal_municipal"],
                    width="stretch")

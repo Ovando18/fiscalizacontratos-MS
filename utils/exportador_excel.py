@@ -52,6 +52,7 @@ COLUNAS: List[Tuple[str, str, str, int]] = [
     ("situacao", "Situação", "texto", 22),
     ("valor_global", "Valor Global (R$)", "moeda", 20),
     ("valor_empenhado", "Valor Empenhado (R$)", "moeda", 20),
+    ("valor_liquidado", "Valor Liquidado (R$)", "moeda", 20),
     ("saldo_a_empenhar", "Saldo a Empenhar (R$)", "moeda", 20),
     ("data_assinatura", "Data Assinatura", "data", 14),
     ("vigencia_inicio", "Vigência Início", "data", 14),
@@ -64,7 +65,7 @@ COLUNAS: List[Tuple[str, str, str, int]] = [
     ("status_empenho", "Status Empenho", "texto", 30),
     ("url_pagina", "Página do Contrato", "link", 16),
     ("numero_controle_pncp", "Nº Controle PNCP", "texto", 30),
-    ("fonte", "Fonte", "texto", 14),
+    ("fonte", "Fonte", "texto", 30),
 ]
 
 ROTULO_LINK = {
@@ -235,8 +236,10 @@ def _aba_parametros(wb: Workbook, filtros: Dict[str, Any], avisos: List[str]) ->
     linhas += [(str(k), ", ".join(map(str, v)) if isinstance(v, (list, tuple, set)) else str(v)) for k, v in filtros.items()]
     linhas += [
         ("Fonte primária", "PNCP — Portal Nacional de Contratações Públicas (https://pncp.gov.br)"),
-        ("Fontes complementares", "Portais da Transparência municipais (quando configurados)"),
-        ("Observação", "Links com status 'Disponível na página do contrato' abrem o detalhamento no PNCP, "
+        ("Fontes complementares", "Portais da Transparência municipais — API de Dados Abertos Fiorilli SCPI "
+                                  "(valor empenhado, liquidado e saldo; contratos ausentes no PNCP)"),
+        ("Observação", "Links com status 'Disponível na página do contrato' abrem o detalhamento no PNCP, e "
+                       "'Disponível no Portal da Transparência' abrem o portal do município, "
                        "onde o documento deve ser localizado manualmente."),
     ]
     for aviso in avisos:
@@ -261,7 +264,7 @@ def gerar_planilha(
     filtros = filtros or {}
     subtitulo = (
         f"Exercício {filtros.get('Exercício', '')} • {len(contratos)} contrato(s) • "
-        f"extraído em {datetime.now():%d/%m/%Y %H:%M} • Fonte: PNCP"
+        f"extraído em {datetime.now():%d/%m/%Y %H:%M} • Fontes: PNCP e Portais da Transparência"
     )
     wb = Workbook()
     _aba_contratos(wb, contratos, subtitulo)
